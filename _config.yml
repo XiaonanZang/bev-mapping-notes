@@ -1,0 +1,6 @@
+title: BEV Mapping Notes
+description: >-
+  Study notes on online HD map generation for autonomous driving: the BEV
+  perception and vectorized mapping lineage (LSS, BEVFormer, HDMapNet, DETR,
+  MapTR, MapTRv2, StreamMapNet), topology extraction, and auto-labeling.
+theme: jekyll-theme-cayman
