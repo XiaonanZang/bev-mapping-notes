@@ -334,6 +334,29 @@ Why swap out QKᵀ: vanilla attention over a 200x200 BEV grid attending to full 
 net is also what gives the soft tolerance to calibration error: the query can sample slightly away
 from the projected reference point.
 
+**What is `ref_pts: (N, 2)`?** One spatial **anchor per query**. `N` = number of queries (the BEV
+cells), and `2` = an `(x, y)` coordinate (normalized `[-1, 1]`) telling that query **where on the
+`value_map` to sample around**. Deformable attention is spatial, so each query must say where to
+look; that "where" is its reference point, and the `offsets` are small nudges around it:
+
+```
+ref_pts[i] = (x, y)                    # query i's single anchor location on the value map
+samples[i] = ref_pts[i] + offsets[i]   # (n_pts, 2): the actual spots to sample
+```
+
+The anchor's meaning depends on the attention: in **temporal self-attention** it is the query's
+**own cell** in the previous BEV; in **spatial cross-attention** it is the query's **projected
+pixel** `(u,v)` in the image. Conventional attention has no `ref_pts` at all, because it compares
+every query to every key by content (`QKᵀ`) instead of sampling near a location. `ref_pts` is the
+price of dropping `K`.
+
+```
+value_map : (C, H, W)     e.g. (32, 50, 50)   # the feature grid being sampled
+ref_pts   : (N, 2)        e.g. (2500, 2)      # 2500 queries, each one (x,y) anchor
+samples   : (N, n_pts, 2) e.g. (2500, 4, 2)   # anchor + offsets = actual sample spots
+out       : (N, C)        e.g. (2500, 32)     # weighted sum over the n_pts sampled C-vectors
+```
+
 **Deformable self-attention vs conventional self-attention, side by side.** The clearest way to see
 what deformable attention drops. Conventional first:
 
