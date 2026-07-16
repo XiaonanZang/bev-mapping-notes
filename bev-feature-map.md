@@ -334,6 +334,77 @@ Why swap out QKᵀ: vanilla attention over a 200x200 BEV grid attending to full 
 net is also what gives the soft tolerance to calibration error: the query can sample slightly away
 from the projected reference point.
 
+**Deformable self-attention vs conventional self-attention, side by side.** The clearest way to see
+what deformable attention drops. Conventional first:
+
+```python
+class SelfAttnHead(nn.Module):            # the vanilla head
+    def __init__(self, C):
+        self.q = nn.Linear(C, C)
+        self.k = nn.Linear(C, C)          # <-- K exists
+        self.v = nn.Linear(C, C)
+        self.proj = nn.Linear(C, C)
+
+    def forward(self, x):                 # x: (N, C) tokens
+        Q, K, V = self.q(x), self.k(x), self.v(x)   # all three from the SAME x  ("self")
+        scores = Q @ K.T / sqrt(C)        # (N, N)  <-- ALL-PAIRS dot product, O(N^2)
+        A = scores.softmax(dim=-1)        # (N, N)  softmax over ALL N keys
+        out = A @ V                       # (N, C)  weighted sum over all tokens
+        return self.proj(out)
+```
+
+Deformable:
+
+```python
+class DeformSelfAttnHead(nn.Module):
+    def __init__(self, C, n_pts):
+        self.v = nn.Linear(C, C)              # V still exists
+        self.offset = nn.Linear(C, n_pts * 2) # query -> WHERE to sample   (REPLACES K)
+        self.attn = nn.Linear(C, n_pts)       # query -> HOW MUCH to weight (REPLACES Q@K.T)
+        self.proj = nn.Linear(C, C)
+        self.n_pts = n_pts
+
+    def forward(self, x, ref_pts, value_map): # x:(N,C)  ref_pts:(N,2) in[-1,1]  value_map:(C,H,W)
+        offsets = self.offset(x).view(-1, self.n_pts, 2) * 0.1  # (N, n_pts, 2)  WHERE
+        weights = self.attn(x).softmax(dim=-1)                  # (N, n_pts)  HOW MUCH (over n_pts, NOT N)
+        samples = ref_pts[:, None, :] + offsets                 # (N, n_pts, 2)  near the reference point
+        vmap = self.v(value_map.permute(1, 2, 0)).permute(2, 0, 1)   # value-projected feature map
+        sampled = F.grid_sample(vmap[None], samples.view(1, -1, self.n_pts, 2), align_corners=True)
+        sampled = sampled[0].permute(1, 2, 0)                   # (N, n_pts, C)
+        out = (sampled * weights[..., None]).sum(1)             # (N, C)  weighted sum over n_pts
+        return self.proj(out)
+```
+
+Line for line:
+
+| | Conventional | Deformable |
+|---|---|---|
+| Q projection | `q(x)` | `x` drives offsets/weights directly |
+| K projection | `k(x)` present | **gone** |
+| V projection | `v(x)` | `v(value_map)` |
+| Where weights come from | `Q @ Kᵀ` (compare query to every key) | `Linear(x)` (predict directly) |
+| Softmax over | `N` keys (all tokens) | `n_pts` sample points (4-8) |
+| What it attends to | **all** N positions (global) | a few **sampled** points near a reference (local) |
+| Needs a reference point? | no (positional encoding) | **yes** (a spatial location to sample around) |
+| Cost | `O(N^2)` | `O(N * n_pts)` |
+
+Verified cost on a 50x50 grid (N=2500):
+
+```
+CONVENTIONAL:  score matrix (N,N) = (2500, 2500) = 6,250,000 entries
+DEFORMABLE:    weights   (N,n_pts) = (2500, 4)    =    10,000 entries   -> 625x fewer
+```
+
+On the real 200x200 BEV (N=40,000), conventional self-attention is ~1.6 billion pairwise scores per
+layer per head; deformable is 40,000 x 4 = 160,000. That factor is why BEVFormer can afford temporal
+attention over a full BEV grid every frame.
+
+The takeaway: conventional attention **discovers** where to look by comparing the query to every key
+(`QKᵀ`); deformable **predicts** where to look with a linear layer and samples the value there. It
+trades a content-based global lookup for a learned, sparse, spatial one. For BEV that is exactly
+right, the evidence for a cell is spatially near its own location (previous BEV) or near its
+projected pixel (image), so a learned local sample is all you need.
+
 **Spatial cross-attention (BEV query -> image features).** The value is the **image feature maps
 from the camera backbone**; that different domain is what makes it *cross*.
 
