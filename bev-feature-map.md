@@ -270,6 +270,141 @@ informative features are. Not a fix for calibration error, but a reduction in br
 lineage is, in part, a gradual softening of the hard geometric constraints the earliest methods
 required.
 
+### BEVFormer, in code
+
+The mental shift from LSS: LSS **pushes** features out (forward, depth-based). BEVFormer **pulls**
+them in (backward). You start from a grid of learnable **BEV queries**, one per ground cell, and
+each query goes and *fetches* the features it needs: from the camera image (spatial cross-attention)
+and from the past (temporal self-attention). No depth estimation anywhere.
+
+```
+BEV queries Q:  a grid of H_bev x W_bev learnable C-vectors, one per ground cell (x, y)
+```
+
+**One encoder layer (pseudo-code).** BEVFormer stacks L of these. Order matters: temporal first,
+then spatial, then FFN.
+
+```
+BEVFORMER_LAYER(Q, image_feats, prev_bev, ego_motion):
+
+    # 1. TEMPORAL SELF-ATTENTION: each query pulls from the previous frame (BEV -> BEV)
+    prev_aligned = warp(prev_bev, ego_motion)      # move t-1 BEV into the current ego frame
+    Q = norm(Q + temporal_self_attn(Q, ref=own_cell, value=prev_aligned))
+
+    # 2. SPATIAL CROSS-ATTENTION: each query pulls from the camera images (BEV -> image)
+    for each query q at ground cell (x, y):
+        pillar = [(x,y,z_1), ..., (x,y,z_k)]        # sample several HEIGHTS along the pillar
+        for each 3D point in pillar:
+            for each camera it projects into (hit-test via K, R, t):
+                uv = project(point, camera)          # 3D -> image pixel = the reference point
+                q += deformable_attn(q, ref=uv, value=image_feat[camera])
+    Q = norm(Q)
+
+    # 3. feed-forward
+    Q = norm(Q + FFN(Q))
+    return Q
+```
+
+**The shared engine: deformable attention.** Both attentions are the same operation with a
+different `value`. It departs from vanilla attention in a way worth stating precisely: there is
+**no K and no QKᵀ dot product**. The attention weights are predicted **directly from the query** by
+a linear layer; the value is **sampled** at a reference point plus learned offsets.
+
+```python
+class DeformAttn(nn.Module):
+    def __init__(self, C, n_pts):
+        super().__init__()
+        self.offset = nn.Linear(C, n_pts * 2)     # query -> WHERE to sample (offsets from the ref point)
+        self.attn   = nn.Linear(C, n_pts)         # query -> HOW MUCH to weight each sample (no K!)
+        self.n_pts  = n_pts
+
+    def forward(self, query, ref_pts, value):
+        # query:(Nq,C)  ref_pts:(Nq,2) in [-1,1]  value:(C,Hv,Wv)
+        offsets = self.offset(query).view(-1, self.n_pts, 2) * 0.1   # (Nq, n_pts, 2)
+        weights = self.attn(query).softmax(-1)                       # (Nq, n_pts) weights straight from Q
+        samples = ref_pts[:, None, :] + offsets                      # look NEAR the reference point
+        grid    = samples.view(1, -1, self.n_pts, 2)
+        sampled = F.grid_sample(value[None], grid, align_corners=True)  # bilinear sample the value map
+        sampled = sampled[0].permute(1, 2, 0)                        # (Nq, n_pts, C)
+        return (sampled * weights[..., None]).sum(1)                  # (Nq, C) weighted sum
+```
+
+Why swap out QKᵀ: vanilla attention over a 200x200 BEV grid attending to full image/history maps is
+`O((HW)^2)`, intractable. Deformable makes it `O(HW * n_pts)` with `n_pts` around 4-8. The `offset`
+net is also what gives the soft tolerance to calibration error: the query can sample slightly away
+from the projected reference point.
+
+**Spatial cross-attention (BEV query -> image features).** The value is the **image feature maps
+from the camera backbone**; that different domain is what makes it *cross*.
+
+```python
+def spatial_cross_attn(bev_q, bev_xy, img_feat, deform, project_fn):
+    ref_img = project_fn(bev_xy)              # BEV cell (x,y) -> its (u,v) pixel in the image, in [-1,1]
+    return deform(bev_q, ref_img, img_feat)   # deformable-attend at that projected location
+```
+
+The whole content here is `project_fn`: the `K, R, t` projection from a ground cell to an image
+pixel. Note that one BEV cell fans out to **many `(u,v)`**: `k` pillar heights each project to a
+pixel, in each of the 1-2 cameras the point hits. BEVFormer averages over those valid (hit)
+reference points. (This is BEVFormer hedging the unknown **height**, the same way LSS hedges the
+unknown **depth** with a distribution: cover the missing 3rd axis by sampling several candidates.)
+
+**Temporal self-attention (BEV query -> previous BEV features).** Same engine; the value is the
+**warped previous BEV**, so it stays inside the BEV domain, which is what makes it *self*.
+
+```python
+def temporal_self_attn(bev_q, bev_grid_xy, prev_bev, deform, warp_fn):
+    prev_aligned = warp_fn(prev_bev)          # ego-motion compensate the t-1 BEV into the current frame
+    ref_self = bev_grid_xy                    # each query attends around ITS OWN cell in the prev BEV
+    return deform(bev_q, ref_self, prev_aligned)
+```
+
+The key line is `warp_fn`: the vehicle moved between `t-1` and `t`, so the previous BEV grid is in a
+different coordinate frame. You warp it by the ego motion so a lane segment seen last frame lands at
+the correct *current* `(x,y)`, then each query looks up its own cell in that aligned history. (Real
+BEVFormer attends to both current queries and the warped previous BEV; the previous-frame half is
+the new idea.)
+
+**The value source is the whole story of self vs cross:**
+
+| | Query (offsets + weights from) | Value (features sampled) | domain |
+|---|---|---|---|
+| Spatial **cross**-attn | current BEV query | **image** backbone features | BEV → image → *cross* |
+| Temporal **self**-attn | current BEV query | previous **BEV** features (warped) | BEV → BEV → *self* |
+
+The query is always the same BEV cell (it drives *where* to look and *how much* to weight). Only the
+value source changes, and its domain is what names the attention.
+
+**Runnable mini (verified output):** single camera, simplified projection/warp, tiny grid.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+# ... DeformAttn, spatial_cross_attn, temporal_self_attn as above ...
+
+Nq = H_bev * W_bev                          # 50*50 = 2500 BEV cells
+bev_q   = torch.randn(Nq, C)                # learnable BEV queries, flattened
+deform  = DeformAttn(C, n_pts)
+img_feat = torch.randn(C, Hf, Wf)           # from the image backbone   (the CROSS value)
+prev_bev = torch.randn(C, H_bev, W_bev)     # BEV feature map at t-1     (the SELF value)
+
+tsa     = temporal_self_attn(bev_q, bev_grid_xy, prev_bev, deform, warp_fn)   # pull from past
+sca     = spatial_cross_attn(tsa, bev_world_xy, img_feat, deform, project_fn) # pull from image
+bev_out = sca.view(H_bev, W_bev, C).permute(2, 0, 1)
+```
+
+```
+BEV queries (Nq, C):         (2500, 32)      2500 = 50x50 BEV cells, each a 32-vector
+after temporal self-attn:    (2500, 32)      pulled from warped previous BEV
+after spatial cross-attn:    (2500, 32)      pulled from image features
+BEV feature map (C,H,W):     (32, 50, 50)    reshape back to the grid -> ready for a task head
+```
+
+Same output shape as LSS's BEV map (`C x H x W`), reached by *pulling* instead of *pushing*.
+
+**The one-line contrast:** LSS decides where each pixel goes (forward, depth-based); BEVFormer lets
+each BEV cell decide which pixels to look at (backward, attention-based), and gets temporal fusion
+for free by also looking at the warped previous BEV.
+
 ## BEVFusion (2022, two independent papers: MIT and ADLab)
 
 Fuses camera and LiDAR in BEV space:
