@@ -54,7 +54,47 @@ feature in the BEV grid.
 
 The whole camera-to-BEV lift is three ideas, and each is one or two lines of tensor math. LSS is
 fully open source ([`nv-tlabs/lift-splat-shoot`](https://github.com/nv-tlabs/lift-splat-shoot),
-`src/models.py`), and the three steps above map almost one-to-one onto its methods:
+`src/models.py`).
+
+**Step-by-step workflow (pseudo-code).** The abstract shape before the real code:
+
+```
+LIFT-SPLAT-SHOOT :  N camera images  ->  one BEV feature map
+
+# ---- one-time setup: the ray grid ----
+frustum = create_frustum()
+    for each depth bin d in [d_min .. d_max]:          # D bins
+        for each feature-map pixel (u, v):             # H x W
+            store the point (u, v, d)                  # -> (D, H, W, 3): a ray of D points per pixel
+
+# ---- per frame ----
+for each camera n in 1..N:
+
+    # STEP 2  GEOMETRY: where does each frustum point land in 3D?
+    ego_pts[n] = extrinsic[n] @ ( intrinsic[n]^-1 @ frustum )    # (D,H,W,3) in ego meters
+
+    # STEP 1  LIFT: attach a feature to each point, weighted by soft depth
+    depth_logits, context = backbone(image[n])         # (D,H,W) , (C,H,W)
+    depth   = softmax(depth_logits, over D)            # depth distribution, sums to 1
+    feat[n] = depth  (outer product)  context          # (D,H,W,C)
+
+# STEP 3  SPLAT: drop every point into the BEV grid, SUM features per cell
+bev = zeros(C, X, Y)
+for every lifted point p across all cameras:
+    (x, y) = ego_pts[p][:2]                            # ignore z  -> height collapses
+    if (x, y) inside grid:
+        bev[:, cell_of(x, y)] += feat[p]               # summation along height
+
+# STEP 4  SHOOT
+output = task_head(bev)                                # segmentation / detection / MapTR decoder
+```
+
+Two things to notice in the shape of the loop: **geometry is frame-independent** (the frustum and
+its unprojection depend only on calibration, so `create_frustum` runs once), while the **features
+are per-frame** (the backbone re-runs each frame). And the splat is the only place the `N` cameras
+*merge*: they all sum into the same shared BEV grid.
+
+The three steps above map almost one-to-one onto LSS's methods:
 
 | Step | LSS function | What it does |
 |---|---|---|
