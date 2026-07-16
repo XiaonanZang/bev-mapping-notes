@@ -42,8 +42,7 @@ split in mind is the fastest way to place any new paper in the landscape.
 |---|---|---|
 | 1 | **Overview & the lineage** (this page) | the problem, the two-problem split, the character story |
 | 2 | [nuScenes & map metrics](nuscenes-metrics.html) | the dataset, sensor suite, HD map layers, mAP + Chamfer distance |
-| 3 | [Building the BEV feature map](bev-feature-map.html) | LSS lift-splat, BEVFormer spatial/temporal attention, BEVFusion fusion |
-| 3b | [LSS lift-splat, in code](lss-in-code.html) | the three key lines + a runnable mini-implementation, mapped to the real repo |
+| 3 | [Building the BEV feature map](bev-feature-map.html) | LSS lift-splat (with runnable code), BEVFormer spatial/temporal attention, BEVFusion fusion |
 | 4 | [Raster to vector: HDMapNet → DETR → MapTR](raster-to-vector.html) | the paradigm shift + MapTR's hierarchical queries, permutation-equivalent matching, Hungarian |
 | 5 | [Refinements & temporal: MapTRv2 + StreamMapNet](maptr-refinements.html) | aux seg head, uniform sampling, streaming BEV memory |
 | 6 | [Topology & lane-graph extraction](topology-extraction.html) | BEV pixels to a navigable lane graph, intersections, HD map formats |
