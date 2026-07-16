@@ -511,6 +511,87 @@ Fuses camera and LiDAR in BEV space:
 Richer than camera-only because LiDAR adds precise geometry (exact depth and structure) while camera
 adds semantic richness (color, texture, sign/marking appearance). MapTRv2's fusion backbone is this.
 
+### BEVFusion, in code
+
+The idea is simple by design: two independent branches each produce a BEV feature map **on the same
+grid**, then you concatenate and mix them. No cross-modal attention, just a shared BEV canvas.
+
+**Workflow (pseudo-code):**
+
+```
+BEVFUSION(camera_images, lidar_points):
+
+    # camera branch  (the LSS lift-splat from earlier on this page)
+    img_feats = image_backbone(camera_images)
+    cam_bev   = lift_splat(img_feats, calib)       # (C, H, W)  BEV from cameras
+
+    # lidar branch  (PointPillars-style)
+    lidar_bev = pillar_encoder(lidar_points)       # (C, H, W)  BEV from LiDAR
+
+    # fuse  (same grid -> stack channels -> conv)
+    fused = concat([cam_bev, lidar_bev], dim=channels)  # (2C, H, W)
+    bev   = conv_fuser(fused)                            # (C, H, W)  unified BEV
+    return bev                                           # -> task head (det / seg / MapTR decoder)
+```
+
+**The LiDAR branch: a pillar encoder.** Group points by their `(x, y)` cell, run a small MLP per
+point, then pool per cell and scatter to the BEV grid. Note this is the **same group-by-key pooling**
+as LSS's `voxel_pooling`, the key is again the `(x, y)` cell, only the value source is LiDAR points
+instead of lifted camera features.
+
+```python
+class PillarEncoder(nn.Module):
+    def __init__(self, in_dim, C):
+        self.mlp = nn.Sequential(nn.Linear(in_dim, C), nn.ReLU(), nn.Linear(C, C))
+
+    def forward(self, pts):                 # pts: (P, 4) = x, y, z, intensity
+        ix = ((pts[:,0] - xs) / (xe - xs) * Wb).long()   # x-cell
+        iy = ((pts[:,1] - ys) / (ye - ys) * Hb).long()   # y-cell
+        keep = in_grid(ix, iy); pts, ix, iy = pts[keep], ix[keep], iy[keep]
+        feats = self.mlp(pts)               # (P, C) per-point features
+        cell  = iy * Wb + ix                # group-by-key: the (x,y) cell id
+        bev = torch.zeros(Hb * Wb, C)
+        bev.scatter_reduce_(0, cell[:,None].expand(-1, C), feats, reduce="amax", include_self=False)
+        return bev.view(Hb, Wb, C).permute(2, 0, 1)      # (C, H, W)  each cell = max over its points
+```
+
+**The fuser: concat + conv (no attention).** Both BEV maps are already aligned on the same grid, so
+fusion is just stacking channels and mixing with a couple of convs.
+
+```python
+class Fuser(nn.Module):
+    def __init__(self, C):
+        self.conv = nn.Sequential(nn.Conv2d(2*C, C, 3, padding=1), nn.ReLU(),
+                                  nn.Conv2d(C, C, 3, padding=1))
+
+    def forward(self, cam_bev, lidar_bev):
+        x = torch.cat([cam_bev, lidar_bev], dim=0)   # (2C, H, W) channel concat
+        return self.conv(x[None])[0]                 # (C, H, W)  unified BEV
+```
+
+**Verified output:**
+
+```
+camera BEV   (C,H,W): (32, 50, 50)   <- LSS-style lift-splat
+lidar  BEV   (C,H,W): (32, 50, 50)   <- pillar encode + scatter
+concat       (2C,H,W): (64, 50, 50)  <- stack channels
+fused  BEV   (C,H,W): (32, 50, 50)   <- conv fuser -> unified BEV
+```
+
+**Why this simple design wins:**
+
+- **Complementary signals.** LiDAR gives exact geometry (precise depth, structure); camera gives
+  semantics (color, texture, sign/marking appearance). The fused BEV has both.
+- **Robustness.** If one modality degrades (camera in low light, LiDAR in rain), the other still
+  carries the task, because both wrote into the same BEV canvas.
+- **Any task head works.** The unified BEV is task-agnostic: detection, segmentation, or MapTR's
+  vectorized decoder all run on it.
+
+One historical note: MIT's BEVFusion contribution was less about the fusion (concat + conv is
+deliberately plain) and more about making the **camera-to-BEV pooling fast** (it was the latency
+bottleneck), so both branches could run in real time. The "keep it a shared BEV grid" decision is
+what makes the whole thing modular.
+
 ## The stack split (how these compose)
 
 ```
