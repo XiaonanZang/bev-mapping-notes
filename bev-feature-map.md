@@ -41,6 +41,10 @@ feature is spread across depth bins, and summing preserves all contributions. Li
 (VoxelNet, PointPillars) keep 3D because height genuinely matters there (a pedestrian at 1.8m differs
 from a curb at 0.3m); for camera map prediction, height collapse is the right call.
 
+> **See it in code:** the [LSS lift-splat, in code](lss-in-code.html) page walks the three key
+> lines (the outer-product lift, the unprojection, the splat) with a runnable mini-implementation
+> mapped to the real repo.
+
 **The calibration dependency (important)**: the Splat step relies on accurate camera extrinsics
 (position + orientation) and intrinsics (focal length, principal point). A 0.5° mounting-angle error
 translates to about 26cm of positional error for a feature at 30m depth, a large fraction of the
