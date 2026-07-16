@@ -168,6 +168,7 @@ def create_frustum():
     ds = torch.arange(*dbound).view(-1, 1, 1).expand(D, H, W)
     us = torch.linspace(0, W - 1, W).view(1, 1, W).expand(D, H, W)
     vs = torch.linspace(0, H - 1, H).view(1, H, 1).expand(D, H, W)
+    # last axis = the 3 COORDINATES (u, v, depth), NOT rgb. it's a coordinate grid, no features yet.
     return torch.stack((us, vs, ds), dim=-1)            # (D, H, W, 3)
 
 
@@ -182,24 +183,28 @@ def get_geometry(frustum, intrins, rot, trans):
 
 # STEP 1-2: the OUTER PRODUCT lift
 def lift_features(depth_logits, context):
-    depth = depth_logits.softmax(dim=0)                 # (D,H,W) the distribution
-    feat = depth.unsqueeze(1) * context.unsqueeze(0)    # (D,C,H,W) depth x context
+    depth = depth_logits.softmax(dim=0)                 # (D,H,W) depth distribution, sums to 1 over D
+    # per-pixel outer product  d (len D)  x  c (len C)  ->  a D x C matrix at EACH pixel:
+    # each depth bin gets a full copy of the feature c, scaled by that bin's probability.
+    feat = depth.unsqueeze(1) * context.unsqueeze(0)    # (D,1,H,W)*(1,C,H,W) -> (D,C,H,W)
     return feat.permute(0, 2, 3, 1)                     # (D, H, W, C)
 
 
-# STEP 3: voxel_pooling -- the SPLAT (bin by x,y; sum-pool; height collapses)
+# STEP 3: voxel_pooling -- the SPLAT. this is a group-by-key SUM: key=(x,y) cell, value=C-vector.
 def voxel_pooling(ego_pts, feat):
     xlo, xstep, nx = make_grid(xbound)
     ylo, ystep, ny = make_grid(ybound)
-    pts = ego_pts.reshape(-1, 3)
-    f = feat.reshape(-1, C)
-    ix = ((pts[:, 0] - xlo) / xstep).long()
-    iy = ((pts[:, 1] - ylo) / ystep).long()
+    pts = ego_pts.reshape(-1, 3)                # N=D*H*W points, each an (x,y,z)   <- the "entries"
+    f = feat.reshape(-1, C)                     # each point's C-vector             <- the "value"
+    ix = ((pts[:, 0] - xlo) / xstep).long()     # integer x-cell
+    iy = ((pts[:, 1] - ylo) / ystep).long()     # integer y-cell  (z is never used -> height collapses)
     keep = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)   # drop points outside the grid
     ix, iy, f = ix[keep], iy[keep], f[keep]
     bev = torch.zeros(nx, ny, C)
-    flat = ix * ny + iy
-    bev.view(nx * ny, C).index_add_(0, flat, f)         # sum-pool = summation along height
+    flat = ix * ny + iy                         # one integer per point = the (x,y) "dict key"
+    # group-by-key sum: add each point's feature into its cell's row. differentiable scatter-add;
+    # real LSS uses QuickCumsum (sort-by-key + cumsum + boundary-diff) for the same result, faster.
+    bev.view(nx * ny, C).index_add_(0, flat, f)
     return bev.permute(2, 0, 1)                          # (C, X, Y)
 
 
