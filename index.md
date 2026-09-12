@@ -169,6 +169,7 @@ relative to the model?**
 |---|---|---|
 | 13 | [Offline map generation: the whole survey at once](offline-map-generation.html) | accumulate every LiDAR return into one dense **intensity raster**, then extract. **Perception gets easy; topology at city scale does not** |
 | 14 | [Frame-wise extraction, then fusion](framewise-fusion.html) | extract per frame, fuse the **finished detections** using the pose. **Offline and online become the same system with different window sizes** |
+| 15 | [Talks — the same material, on video](talks.html) | **a clickable watchlist** covering pages 13 and 14: the Waabi mapping tutorial, Stachniss on localization and photogrammetry, Qi on offboard perception, and the CVPR WAD keynotes from Waymo, Tesla and Cruise |
 
 ## The axis
 
