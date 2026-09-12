@@ -11,9 +11,10 @@ the intuition with the architecture and the interview framing for each.
 
 Written to be read on a phone in short sittings, then recalled cold.
 
-The notes come in two parts. **Part I** follows how a vehicle builds a map from its own sensors.
+The notes come in three parts. **Part I** follows how a vehicle builds a map from its own sensors.
 **Part II** covers what has to happen next: map priors, crowdsourcing across a fleet, and moving to
-a city you have never labelled.
+a city you have never labelled. **Part III** turns the question around: how does the map get made in
+the first place, offline, from a survey that has already been driven?
 
 ## Why online HD mapping
 
@@ -150,6 +151,44 @@ entire engineering problem.**
 Sensors alone give a short-range map that is thrown away every drive and fails in a new city.
 Priors buy range. Crowdsourcing buys persistence. Synthesis buys the new city. All three need a
 shared frame, and none of them removes the need to prove the map is right.
+
+---
+
+# Part III: making the map offline
+
+Parts I and II assume the vehicle is inferring a map as it drives. **But somebody made the HD map
+those benchmarks are scored against, and somebody makes the ground truth that trains every model
+above.** That job is offline, it is mostly LiDAR, and it is a different literature.
+
+**The organising question for this part is one design decision: where does the aggregation sit
+relative to the model?**
+
+## Part III roadmap
+
+| # | Page | The one idea |
+|---|---|---|
+| 13 | [Offline map generation: the whole survey at once](offline-map-generation.html) | accumulate every LiDAR return into one dense **intensity raster**, then extract. **Perception gets easy; topology at city scale does not** |
+| 14 | [Frame-wise extraction, then fusion](framewise-fusion.html) | extract per frame, fuse the **finished detections** using the pose. **Offline and online become the same system with different window sizes** |
+
+## The axis
+
+| | Aggregation happens | Can it run online? | Auditable? |
+|---|---|---|---|
+| **Page 13** | **before** the model | no — it needs the whole survey | the evidence is fused before anyone can inspect it |
+| **Page 14** | **after** the model | **yes** — shrink the window | **yes** — correspondences and per-vertex agreement are artifacts you can look at |
+| *(and a third)* | **before *training* only** | yes | LIE distills an accumulated map into a single-sweep model, then discards it |
+
+## The physical cue, which decides the architecture
+
+**Lane paint is retroreflective — intensity carries it and geometry does not. A curb is the same
+material as the road — geometry carries it and intensity does not.** One sensor, two cues, two
+heads. Most confusion about these papers dissolves once you ask which cue a number rests on.
+
+## Part III in one line
+
+Offline mapping has more data, more compute and no latency budget, so the perception problem
+largely dissolves — and what remains is **vectorization, topology, association and the pose prior**,
+none of which is a perception problem, and none of which is solved.
 
 ---
 
